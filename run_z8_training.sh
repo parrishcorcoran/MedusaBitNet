@@ -33,7 +33,18 @@ export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-4}"
 echo "[run_z8] OMP_NUM_THREADS=$OMP_NUM_THREADS  CORES_PER_SOCKET=$CORES_PER_SOCKET"
 echo "[run_z8] pinning to NUMA node 0"
 
+# If the first arg is --benchmark, run the smoke-test / timing script instead
+# of the full training loop. Everything after --benchmark is forwarded to it.
+#   ./run_z8_training.sh --benchmark
+#   ./run_z8_training.sh --benchmark --bench_steps 20 --seq_len 1024
+SCRIPT="train.py"
+if [[ "${1:-}" == "--benchmark" ]]; then
+    SCRIPT="benchmark.py"
+    shift
+    echo "[run_z8] running benchmark smoke-test"
+fi
+
 # --cpunodebind=0  -> schedule threads only on socket 0's cores
 # --membind=0      -> allocate memory only from socket 0's DIMMs
 exec numactl --cpunodebind=0 --membind=0 \
-    python train.py "$@"
+    python "$SCRIPT" "$@"

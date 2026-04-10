@@ -107,6 +107,56 @@ PY
 
 ---
 
+## Smoke-test first (recommended)
+
+Before kicking off a multi-hour training run, run the benchmark. It loads the real model, runs a handful of forward+backward passes on **random token inputs** (no dataset download), and prints an ETA for a full run:
+
+```bash
+./run_z8_training.sh --benchmark
+```
+
+You'll get output like:
+```
+[bench] trainable params: 33.55M / total params: 2430.12M (1.380%)
+[bench] model load took 42.1s
+[bench] ipex.optimize done in 3.8s
+[bench]   warmup step 1/2: 58.3s     # <-- first step compiles the graph
+[bench]   warmup step 2/2: 12.4s
+[bench]   step  1/10: total=11823.4ms  fwd=9102.1ms  bwd+opt=2721.3ms  loss=11.472
+...
+  per-step (total): mean=11984.2ms  median=11956.0ms
+  → one optimizer step  ≈ 3.2m
+  → 2000 optimizer steps ≈ 6.41h
+[bench] looks healthy. Safe to launch the full training run.
+```
+
+**What to look for:**
+- The **first warmup step is always slow** — that's `torch.compile` building the graph. Ignore it.
+- Steady-state per-step time should be roughly **constant** across the 10 timed steps (±10%). Growing step times = something is wrong (thermal throttling, memory pressure, swap).
+- **Loss should stay around `ln(vocab_size)` ≈ 10–12** because the inputs are random — we're not training, just timing.
+- **Head accuracies should be ≈ `1/vocab_size`** (essentially zero) for the same reason. That's the sanity check that the loss wiring is correct.
+- If you see `>60s per micro-step`, the script prints a checklist of likely causes (NUMA pinning, thread count, `torch.compile` backend, etc.).
+
+### Benchmark flags
+```bash
+./run_z8_training.sh --benchmark \
+    --seq_len 2048 \
+    --batch_size 1 \
+    --bench_steps 10 \
+    --warmup_steps 2 \
+    --projected_steps 2000 \
+    --grad_accum_steps 16
+```
+
+The `--projected_steps` / `--grad_accum_steps` flags don't change what the benchmark does — they just control the ETA math at the end so you can compare different training configs without re-running.
+
+To isolate IPEX-only performance (without `torch.compile`):
+```bash
+./run_z8_training.sh --benchmark --no_compile
+```
+
+---
+
 ## Quick start
 
 ```bash
