@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Data & checkpoints
+data/
+checkpoints/
+*.bin
+*.pt
+*.safetensors
+
+# W&B
+wandb/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

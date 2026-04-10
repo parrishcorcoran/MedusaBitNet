@@ -1,0 +1,8 @@
+torch>=2.3
+intel_extension_for_pytorch>=2.3
+transformers>=4.43
+datasets>=2.19
+wandb>=0.17
+numpy>=1.26
+accelerate>=0.33
+sentencepiece>=0.2
