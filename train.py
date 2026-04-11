@@ -1,6 +1,9 @@
 """
 Medusa-on-BitNet CPU training loop for the HP Z8 G4.
 
+Part of the MedusaBitNet project by Parrish Corcoran — training the Medusa
+heads that ride on top of Microsoft's BitNet b1.58 ternary-weight backbone.
+
 Hardware guardrails (important — the Z8 has a tiny display GPU we must NOT
 touch):
     - `CUDA_VISIBLE_DEVICES=""` is set *before* torch is imported so CUDA
@@ -35,8 +38,52 @@ from torch.utils.data import DataLoader
 
 import intel_extension_for_pytorch as ipex  # noqa: F401  (AVX-512 fusion)
 
+import numpy as np
+
 from dataset import PackedTokenDataset, PackingConfig, build_token_bin, collate_packed
-from model import MedusaBitNet, MedusaConfig
+from model import MedusaBitNet, MedusaConfig, MedusaHeads
+
+
+class CachedHiddenDataset(torch.utils.data.Dataset):
+    """
+    Yields (hidden[i], tokens[i]) pairs from the backbone hidden-state cache
+    produced by cache_hidden.py, paired with the matching token sequences.
+
+    hidden bin layout: [num_seqs, seq_len, hidden_size] bfloat16, row-major.
+    Each token sample is seq_len+1 long (same semantics as PackedTokenDataset).
+    """
+
+    def __init__(self, hidden_path: str, token_bin_path: str, seq_len: int, hidden_size: int):
+        self.seq_len = seq_len
+        self.hidden_size = hidden_size
+        # Memmap hidden states as uint16 (bf16 bit pattern), reshape later on access.
+        self._hidden = np.memmap(hidden_path, dtype=np.uint16, mode="r")
+        per_seq = seq_len * hidden_size
+        assert self._hidden.size % per_seq == 0, (
+            f"hidden bin size {self._hidden.size} not a multiple of {per_seq}"
+        )
+        self.num_samples = self._hidden.size // per_seq
+        self._tokens = PackedTokenDataset(token_bin_path, seq_len)
+        assert len(self._tokens) >= self.num_samples, (
+            f"token bin has {len(self._tokens)} seqs but hidden cache has {self.num_samples}"
+        )
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, idx: int):
+        per_seq = self.seq_len * self.hidden_size
+        start = idx * per_seq
+        flat = np.asarray(self._hidden[start : start + per_seq])  # uint16 copy
+        hidden = torch.from_numpy(flat).view(torch.bfloat16).view(self.seq_len, self.hidden_size)
+        targets = self._tokens[idx]  # int64 [seq_len+1]
+        return hidden, targets
+
+
+def collate_cached(batch):
+    hiddens = torch.stack([b[0] for b in batch], dim=0)
+    targets = torch.stack([b[1] for b in batch], dim=0)
+    return hiddens, targets
 
 
 @dataclass
@@ -49,6 +96,10 @@ class TrainConfig:
     batch_size: int = 1
     grad_accum_steps: int = 16
     num_workers: int = 2
+
+    # Cached-hidden fast path (skips backbone entirely when both are set)
+    cached_hidden_path: str = ""
+    cached_lm_head_path: str = ""
 
     # Model
     backbone: str = "microsoft/bitnet-b1.58-2B-4T"
@@ -143,55 +194,86 @@ def main():
         print(f"[train] wandb disabled ({e})")
         use_wandb = False
 
+    cached_mode = bool(cfg.cached_hidden_path) and bool(cfg.cached_lm_head_path)
+
     # ---- Data ---------------------------------------------------------------
-    pack_cfg = PackingConfig(
-        dataset_name=cfg.dataset_name,
-        dataset_split=cfg.dataset_split,
-        seq_len=cfg.seq_len,
-        bin_path=cfg.bin_path,
-        tokenizer_name_or_path=cfg.backbone,
-    )
-    build_token_bin(pack_cfg)
-    dataset = PackedTokenDataset(cfg.bin_path, cfg.seq_len)
-    loader = DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        collate_fn=collate_packed,
-        pin_memory=False,  # CPU-only: pin_memory is meaningless and wastes RAM
-        drop_last=True,
-    )
+    if cached_mode:
+        print(f"[train] cached-hidden mode: {cfg.cached_hidden_path}")
+        lm_head_weight = torch.load(cfg.cached_lm_head_path, map_location="cpu")
+        lm_head_weight = lm_head_weight.to(torch.bfloat16).contiguous()
+        vocab_size, hidden_size = lm_head_weight.shape
+        dataset = CachedHiddenDataset(
+            cfg.cached_hidden_path, cfg.bin_path, cfg.seq_len, hidden_size,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            collate_fn=collate_cached,
+            pin_memory=False,
+            drop_last=True,
+        )
+    else:
+        pack_cfg = PackingConfig(
+            dataset_name=cfg.dataset_name,
+            dataset_split=cfg.dataset_split,
+            seq_len=cfg.seq_len,
+            bin_path=cfg.bin_path,
+            tokenizer_name_or_path=cfg.backbone,
+        )
+        build_token_bin(pack_cfg)
+        dataset = PackedTokenDataset(cfg.bin_path, cfg.seq_len)
+        loader = DataLoader(
+            dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            collate_fn=collate_packed,
+            pin_memory=False,
+            drop_last=True,
+        )
 
     # ---- Model --------------------------------------------------------------
-    model_cfg = MedusaConfig(
-        backbone_name_or_path=cfg.backbone,
-        num_heads=cfg.num_heads,
-        num_layers_per_head=cfg.num_layers_per_head,
-        dtype=torch.bfloat16,
-    )
-    model = MedusaBitNet(model_cfg)
-    model.train()  # heads train; backbone stays in eval via no_grad context
+    if cached_mode:
+        heads = MedusaHeads(
+            hidden_size=hidden_size,
+            vocab_size=vocab_size,
+            num_heads=cfg.num_heads,
+            num_layers_per_head=cfg.num_layers_per_head,
+            dtype=torch.bfloat16,
+        )
+        heads.train()
+        model = heads  # only the heads exist in this mode
+        # Register lm_head_weight as a non-trainable buffer for forward use.
+        model.register_buffer("_lm_head_weight", lm_head_weight, persistent=False)
+        trainable_params = list(model.parameters())
+    else:
+        model_cfg = MedusaConfig(
+            backbone_name_or_path=cfg.backbone,
+            num_heads=cfg.num_heads,
+            num_layers_per_head=cfg.num_layers_per_head,
+            dtype=torch.bfloat16,
+        )
+        model = MedusaBitNet(model_cfg)
+        model.train()
+        trainable_params = model.trainable_parameters()
 
     # ---- Optimizer (only heads are trainable) ------------------------------
     optim = torch.optim.AdamW(
-        model.trainable_parameters(),
+        trainable_params,
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
         betas=(0.9, 0.95),
     )
 
-    # ---- IPEX + torch.compile for AVX-512 fusion ---------------------------
-    # IPEX folds ops (e.g. linear+silu) into AVX-512 kernels; torch.compile
-    # with the ipex backend then JITs the full training graph.
-    model, optim = ipex.optimize(
-        model, optimizer=optim, dtype=torch.bfloat16, inplace=True,
-    )
-    try:
-        model = torch.compile(model, backend="ipex")
-        print("[train] torch.compile(backend='ipex') enabled")
-    except Exception as e:
-        print(f"[train] torch.compile unavailable, running eager: {e}")
+    # ---- IPEX fusion. torch.compile stays off: inductor lowers BitNet's
+    # packed uint8 weights into a raw mm(bf16, uint8) that crashes at runtime.
+    if not cached_mode:
+        model, optim = ipex.optimize(
+            model, optimizer=optim, dtype=torch.bfloat16, inplace=True,
+        )
+        print("[train] torch.compile disabled (BitNet packed-weight incompat), running eager")
 
     scheduler = CosineAnnealingLR(optim, T_max=max(1, cfg.max_steps - cfg.warmup_steps))
 
@@ -211,14 +293,19 @@ def main():
             data_iter = iter(loader)
             batch = next(data_iter)
 
-        # batch: [B, seq_len+1] int64
-        inputs = batch[:, :-1].contiguous()   # [B, T]
-        targets = batch                       # [B, T+1]
-
-        with torch.cpu.amp.autocast(dtype=torch.bfloat16):
-            medusa_logits = model(inputs)     # [B, T, k, V]
-            loss, head_accs = medusa_loss(medusa_logits, targets, cfg.num_heads)
-            loss = loss / cfg.grad_accum_steps
+        if cached_mode:
+            hidden, targets = batch  # hidden [B,T,H] bf16, targets [B,T+1] int64
+            with torch.cpu.amp.autocast(dtype=torch.bfloat16):
+                medusa_logits = model(hidden, model._lm_head_weight)
+                loss, head_accs = medusa_loss(medusa_logits, targets, cfg.num_heads)
+                loss = loss / cfg.grad_accum_steps
+        else:
+            inputs = batch[:, :-1].contiguous()   # [B, T]
+            targets = batch                       # [B, T+1]
+            with torch.cpu.amp.autocast(dtype=torch.bfloat16):
+                medusa_logits = model(inputs)
+                loss, head_accs = medusa_loss(medusa_logits, targets, cfg.num_heads)
+                loss = loss / cfg.grad_accum_steps
 
         loss.backward()
         loss_accum += loss.item() * cfg.grad_accum_steps
@@ -233,7 +320,7 @@ def main():
             g["lr"] = lr_now
 
         if cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.grad_clip)
+            torch.nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip)
         optim.step()
         optim.zero_grad(set_to_none=True)
         if step >= cfg.warmup_steps:
@@ -261,8 +348,10 @@ def main():
 
         if step % cfg.ckpt_every == 0:
             ckpt_path = os.path.join(cfg.ckpt_dir, f"medusa_heads_step{step}.pt")
-            # Only save the trainable head weights — the backbone is frozen.
-            torch.save({"heads": model.heads.state_dict(), "step": step, "cfg": vars(cfg)}, ckpt_path)
+            heads_state = (
+                model.state_dict() if cached_mode else model.heads.state_dict()
+            )
+            torch.save({"heads": heads_state, "step": step, "cfg": vars(cfg)}, ckpt_path)
             print(f"[train] saved {ckpt_path}")
 
     print("[train] done")

@@ -1,0 +1,750 @@
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index ead6306..d3c4419 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -32,6 +32,7 @@ else()
+     add_subdirectory(lookahead)
+     add_subdirectory(lookup)
+     add_subdirectory(main)
++    add_subdirectory(medusa)
+     add_subdirectory(parallel)
+     add_subdirectory(passkey)
+     add_subdirectory(perplexity)
+diff --git a/examples/medusa/CMakeLists.txt b/examples/medusa/CMakeLists.txt
+new file mode 100644
+index 0000000..a702441
+--- /dev/null
++++ b/examples/medusa/CMakeLists.txt
+@@ -0,0 +1,5 @@
++set(TARGET llama-medusa)
++add_executable(${TARGET} medusa.cpp medusa_tree.cpp)
++install(TARGETS ${TARGET} RUNTIME)
++target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
++target_compile_features(${TARGET} PRIVATE cxx_std_11)
+diff --git a/examples/medusa/medusa.cpp b/examples/medusa/medusa.cpp
+new file mode 100644
+index 0000000..bd446b4
+--- /dev/null
++++ b/examples/medusa/medusa.cpp
+@@ -0,0 +1,283 @@
++// Medusa self-speculative decoding driver for bitnet.cpp.
++//
++// Medusa + BitNet integration by Parrish Corcoran (MedusaBitNet project).
++//
++// High-level flow (linear draft chain, Stage T4 baseline):
++//
++//   1. Load a Medusa-enabled BitNet GGUF (llama_n_medusa_heads(model) > 0).
++//   2. Tokenise the prompt and prefill with llama_decode on seq 0.
++//   3. Loop:
++//        a. After the previous decode, head `k` gives the top-1 speculated
++//           token at depth k+1 (k in [0, K)).
++//        b. Build a verify batch with K+1 tokens: the last accepted token
++//           (root) followed by K speculated tokens. Position i has
++//           pos = last_pos + i and seq_id {0}.
++//        c. llama_decode the verify batch. One backbone forward pass.
++//        d. Walk the chain. For each node `i`, compare the backbone's own
++//           argmax at position i with the speculated token at position i+1.
++//           Accept the longest matching prefix (plus the backbone's own next
++//           token even if no speculations match).
++//        e. Roll back rejected positions in the KV cache via
++//           llama_kv_cache_seq_rm, leaving only the accepted prefix.
++//        f. Emit accepted tokens, update last_pos.
++//   4. Stop on EOS or max new tokens.
++//
++// This is the simplest correct Medusa driver. The linear chain topology means
++// we never need sequence-id branching — every speculated token is on seq 0.
++// A future version will swap in the Medusa-64 sparse tree.
++
++#include "common.h"
++#include "llama.h"
++#include "log.h"
++#include "medusa_tree.h"
++
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++
++struct medusa_params {
++    std::string model_path;
++    std::string prompt = "Hello";
++    int32_t     n_predict    = 64;
++    int32_t     n_ctx        = 2048;
++    int32_t     n_threads    = -1;
++    bool        verbose      = false;
++};
++
++static void print_usage(const char * argv0) {
++    fprintf(stderr,
++        "usage: %s -m MODEL.gguf [-p PROMPT] [-n N] [-c CTX] [-t THREADS] [-v]\n",
++        argv0);
++}
++
++static bool parse_args(int argc, char ** argv, medusa_params & p) {
++    for (int i = 1; i < argc; ++i) {
++        std::string a = argv[i];
++        if (a == "-m" && i + 1 < argc)          p.model_path  = argv[++i];
++        else if (a == "-p" && i + 1 < argc)     p.prompt      = argv[++i];
++        else if (a == "-n" && i + 1 < argc)     p.n_predict   = std::atoi(argv[++i]);
++        else if (a == "-c" && i + 1 < argc)     p.n_ctx       = std::atoi(argv[++i]);
++        else if (a == "-t" && i + 1 < argc)     p.n_threads   = std::atoi(argv[++i]);
++        else if (a == "-v")                     p.verbose     = true;
++        else if (a == "-h" || a == "--help")    { print_usage(argv[0]); return false; }
++        else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); print_usage(argv[0]); return false; }
++    }
++    if (p.model_path.empty()) { print_usage(argv[0]); return false; }
++    return true;
++}
++
++// Greedy argmax over a logits vector of length n_vocab.
++static llama_token argmax(const float * logits, int32_t n_vocab) {
++    llama_token best = 0;
++    float       best_score = logits[0];
++    for (int32_t v = 1; v < n_vocab; ++v) {
++        if (logits[v] > best_score) {
++            best_score = logits[v];
++            best       = (llama_token) v;
++        }
++    }
++    return best;
++}
++
++int main(int argc, char ** argv) {
++    medusa_params p;
++    if (!parse_args(argc, argv, p)) return 1;
++
++    llama_backend_init();
++
++    // ---- model load ----
++    llama_model_params mparams = llama_model_default_params();
++    mparams.n_gpu_layers = 0;  // CPU only
++    llama_model * model = llama_load_model_from_file(p.model_path.c_str(), mparams);
++    if (!model) { fprintf(stderr, "failed to load model\n"); return 1; }
++
++    const int32_t n_medusa = llama_n_medusa_heads(model);
++    if (n_medusa <= 0) {
++        fprintf(stderr,
++            "error: model has no Medusa heads. Use a GGUF produced by "
++            "MedusaBitNet/tools/convert_medusa_heads.py.\n");
++        llama_free_model(model);
++        return 1;
++    }
++    if (n_medusa > MEDUSA_TREE_MAX_DEPTH) {
++        fprintf(stderr,
++            "error: model has %d Medusa heads but this build was compiled "
++            "for at most %d. Increase MEDUSA_TREE_MAX_HEADS in medusa_tree.cpp.\n",
++            n_medusa, MEDUSA_TREE_MAX_DEPTH);
++        llama_free_model(model);
++        return 1;
++    }
++    fprintf(stderr, "[medusa] model loaded, n_medusa_heads=%d\n", n_medusa);
++
++    // ---- context ----
++    llama_context_params cparams = llama_context_default_params();
++    cparams.n_ctx     = p.n_ctx;
++    cparams.n_batch   = p.n_ctx;
++    cparams.n_seq_max = 4;   // plenty for a linear chain (only seq 0 used)
++    if (p.n_threads > 0) {
++        cparams.n_threads       = p.n_threads;
++        cparams.n_threads_batch = p.n_threads;
++    }
++    // Flash attention disabled: the Medusa mask path assumes an F32 KQ mask.
++    cparams.flash_attn = false;
++
++    llama_context * ctx = llama_new_context_with_model(model, cparams);
++    if (!ctx) { fprintf(stderr, "failed to create context\n"); llama_free_model(model); return 1; }
++
++    const int32_t n_vocab = llama_n_vocab(model);
++
++    // ---- tokenise prompt ----
++    std::vector<llama_token> prompt_tokens = common_tokenize(ctx, p.prompt, /*add_special*/ true);
++    if (prompt_tokens.empty()) {
++        fprintf(stderr, "error: empty prompt tokenisation\n");
++        llama_free(ctx);
++        llama_free_model(model);
++        return 1;
++    }
++
++    fprintf(stderr, "[medusa] prompt tokens: %zu\n", prompt_tokens.size());
++    for (auto t : prompt_tokens) {
++        printf("%s", common_token_to_piece(ctx, t).c_str());
++    }
++    fflush(stdout);
++
++    // ---- prefill ----
++    llama_batch batch = llama_batch_init(p.n_ctx, /*embd*/ 0, /*n_seq_max*/ 4);
++
++    for (size_t i = 0; i < prompt_tokens.size(); ++i) {
++        common_batch_add(batch, prompt_tokens[i], (llama_pos) i, { 0 },
++                         /*logits*/ i == prompt_tokens.size() - 1);
++    }
++    if (llama_decode(ctx, batch) != 0) {
++        fprintf(stderr, "prefill decode failed\n");
++        llama_batch_free(batch);
++        llama_free(ctx);
++        llama_free_model(model);
++        return 1;
++    }
++
++    llama_pos   last_pos   = (llama_pos) prompt_tokens.size() - 1;
++    llama_token last_token = argmax(llama_get_logits_ith(ctx, batch.n_tokens - 1), n_vocab);
++    // Slot in the previous decode whose outputs (both main and medusa) we
++    // should sample from when drafting the next step's speculations.
++    // After prefill the relevant slot is the last one; after a verify
++    // decode it's the slot where next_tok was emitted (i.e. n_accept).
++    int32_t    prev_slot  = batch.n_tokens - 1;
++
++    // Emit the first token (the one predicted by the prefill) before we
++    // start the verify loop. Every subsequent loop iteration emits the
++    // tokens NEW to that iteration.
++    printf("%s", common_token_to_piece(ctx, last_token).c_str());
++    fflush(stdout);
++    int32_t n_generated = 1;
++    if (llama_token_is_eog(model, last_token)) {
++        printf("\n");
++        llama_batch_free(batch);
++        llama_free(ctx);
++        llama_free_model(model);
++        llama_backend_free();
++        return 0;
++    }
++
++    // ---- generation loop ----
++    int32_t total_accepted = 0;
++    int32_t total_steps    = 0;
++
++    while (n_generated < p.n_predict) {
++        // Collect top-1 tokens from each Medusa head at the slot of the
++        // previous decode that produced `last_token`. This is the speculation
++        // chain rooted at `last_token`.
++        std::vector<llama_token> spec_tokens(n_medusa);
++        for (int k = 0; k < n_medusa; ++k) {
++            const float * mlogits = llama_get_medusa_logits_ith(ctx, k, prev_slot);
++            if (!mlogits) {
++                fprintf(stderr, "medusa logits missing for head %d (slot %d)\n", k, prev_slot);
++                goto done;
++            }
++            spec_tokens[k] = argmax(mlogits, n_vocab);
++        }
++
++        // Build verify batch: last_token + spec_tokens[0..n_medusa)
++        common_batch_clear(batch);
++        common_batch_add(batch, last_token, last_pos + 1, { 0 }, /*logits*/ true);
++        for (int k = 0; k < n_medusa; ++k) {
++            common_batch_add(batch, spec_tokens[k], last_pos + 2 + k, { 0 }, /*logits*/ true);
++        }
++
++        if (llama_decode(ctx, batch) != 0) {
++            fprintf(stderr, "verify decode failed\n");
++            goto done;
++        }
++
++        // Walk the chain. For each batch slot i, the backbone's argmax is the
++        // "true" next token at position last_pos+1+i+1. It should match
++        // spec_tokens[i] (which is at batch slot i+1) for acceptance to
++        // continue.
++        int32_t n_accept = 0;  // number of speculated tokens accepted
++        llama_token next_tok = 0;
++        for (int i = 0; i <= n_medusa; ++i) {
++            const float * logits = llama_get_logits_ith(ctx, i);
++            if (!logits) { fprintf(stderr, "missing logits at %d\n", i); goto done; }
++            next_tok = argmax(logits, n_vocab);
++
++            if (i < n_medusa && next_tok == spec_tokens[i]) {
++                n_accept++;
++            } else {
++                break;
++            }
++        }
++
++        // Accepted tokens: the first slot (the pre-existing `last_token`,
++        // which is NOT counted as "new"), then `n_accept` speculated tokens,
++        // then one backbone-provided token `next_tok` at the end of the
++        // accepted run.
++        //
++        // Actually we want to emit the NEW tokens: the speculated ones that
++        // matched plus the backbone's fresh token at the first mismatch.
++        std::vector<llama_token> accepted(spec_tokens.begin(), spec_tokens.begin() + n_accept);
++        accepted.push_back(next_tok);
++
++        for (auto t : accepted) {
++            printf("%s", common_token_to_piece(ctx, t).c_str());
++        }
++        fflush(stdout);
++
++        // KV rollback: every position > last_pos + 1 + n_accept must go.
++        const llama_pos keep_upto = last_pos + 1 + (llama_pos) n_accept;
++        llama_kv_cache_seq_rm(ctx, 0, keep_upto + 1, -1);
++
++        last_pos   = keep_upto;
++        last_token = next_tok;
++        // next iteration will sample specs from the slot where next_tok's
++        // logits were produced, which is batch slot n_accept.
++        prev_slot  = n_accept;
++
++        n_generated    += (int32_t) accepted.size();
++        total_accepted += n_accept;
++        total_steps    += 1;
++
++        // Early stop on EOS (check every accepted token).
++        bool hit_eos = false;
++        for (auto t : accepted) {
++            if (llama_token_is_eog(model, t)) { hit_eos = true; break; }
++        }
++        if (hit_eos) break;
++    }
++
++done:
++    printf("\n");
++    if (total_steps > 0) {
++        const double mean_accept = (double) total_accepted / (double) total_steps;
++        fprintf(stderr,
++            "[medusa] steps=%d  accepted_speculations=%d  "
++            "mean_accept_per_step=%.2f/%d  generated=%d\n",
++            total_steps, total_accepted, mean_accept, n_medusa, n_generated);
++    }
++
++    llama_batch_free(batch);
++    llama_free(ctx);
++    llama_free_model(model);
++    llama_backend_free();
++    return 0;
++}
+diff --git a/examples/medusa/medusa_tree.cpp b/examples/medusa/medusa_tree.cpp
+new file mode 100644
+index 0000000..cf31f3d
+--- /dev/null
++++ b/examples/medusa/medusa_tree.cpp
+@@ -0,0 +1,43 @@
++// Static Medusa tree tables.
++//
++// Medusa + BitNet integration by Parrish Corcoran (MedusaBitNet project).
++//
++// FIRST IMPLEMENTATION: a simple linear draft chain of depth K (where K is
++// the number of Medusa heads loaded with the model). The root is the last
++// accepted token; each successive node takes the top-1 prediction from the
++// next Medusa head. This gives up to (K+1)x speedup on perfectly-matched
++// continuations and is equivalent to the "Medusa-1 chain" baseline.
++//
++// Once the chain baseline is benchmarked, this file can be swapped for the
++// full Medusa-64 sparse tree topology from the paper. The run-time code
++// (examples/medusa/medusa.cpp) doesn't care which tree it gets — it just
++// reads parent[]/depth[]/choice[] and fills the batch accordingly.
++//
++// For the chain, we hard-code the maximum supported depth (5 = 1 root + 4
++// head slots). The actual N_NODES is set at run time from
++// llama_n_medusa_heads(model), but the arrays here must be large enough for
++// any supported value.
++
++#include "medusa_tree.h"
++
++// Maximum Medusa head count we pre-compile for. 8 is more than enough for
++// current research checkpoints (4 heads is standard) but leaves room.
++#define MEDUSA_TREE_MAX_HEADS 8
++
++const int32_t MEDUSA_TREE_MAX_DEPTH = MEDUSA_TREE_MAX_HEADS;
++const int32_t MEDUSA_TREE_N_NODES   = MEDUSA_TREE_MAX_HEADS + 1;
++
++// Chain topology: node i's parent is node i-1 (root has parent -1).
++const int32_t MEDUSA_TREE_PARENT[MEDUSA_TREE_MAX_HEADS + 1] = {
++    -1, 0, 1, 2, 3, 4, 5, 6, 7,
++};
++
++// Depth equals the index in a linear chain.
++const int32_t MEDUSA_TREE_DEPTH[MEDUSA_TREE_MAX_HEADS + 1] = {
++    0, 1, 2, 3, 4, 5, 6, 7, 8,
++};
++
++// Always take the top-1 prediction from each head.
++const int32_t MEDUSA_TREE_CHOICE[MEDUSA_TREE_MAX_HEADS + 1] = {
++    0, 0, 0, 0, 0, 0, 0, 0, 0,
++};
+diff --git a/examples/medusa/medusa_tree.h b/examples/medusa/medusa_tree.h
+new file mode 100644
+index 0000000..b73db14
+--- /dev/null
++++ b/examples/medusa/medusa_tree.h
+@@ -0,0 +1,36 @@
++// Static Medusa speculation tree topology.
++//
++// Medusa + BitNet integration by Parrish Corcoran (MedusaBitNet project).
++//
++// A Medusa tree is a fixed sparse set of (depth, candidate_rank) pairs. The
++// canonical "medusa_64" topology from the Medusa paper contains 64 tokens
++// across depth 0..4, branching more at shallow depths and less deeper. The
++// tree is fixed at build time so that the attention mask and sequence-id
++// assignment are deterministic — the runtime just fills in different token
++// IDs each step.
++//
++// The arrays below encode the tree as:
++//     parent[i] = index of node i's parent in the flat node list (-1 = root)
++//     depth[i]  = distance from the root (root has depth 0)
++//     choice[i] = which top-M candidate of the parent-depth's head this node
++//                 was derived from. For depth d > 0, choice[i] selects the
++//                 choice-th most likely token from Medusa head (d-1)'s
++//                 logits. For the root, choice is ignored.
++
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++extern const int32_t MEDUSA_TREE_N_NODES;
++extern const int32_t MEDUSA_TREE_MAX_DEPTH;
++extern const int32_t MEDUSA_TREE_PARENT[];
++extern const int32_t MEDUSA_TREE_DEPTH[];
++extern const int32_t MEDUSA_TREE_CHOICE[];
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/include/llama.h b/include/llama.h
+index b5d9aeb..c3c4807 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -862,6 +862,46 @@ extern "C" {
+     // returns NULL for invalid ids.
+     LLAMA_API float * llama_get_logits_ith(struct llama_context * ctx, int32_t i);
+ 
++    // ========================================================================
++    // Medusa speculative decoding API (BitNet + Medusa by Parrish Corcoran)
++    // ========================================================================
++    //
++    // Number of Medusa heads loaded with the model (0 if the GGUF carries no
++    // medusa.* metadata). Non-zero means the backbone was trained with extra
++    // prediction heads that can be driven for self-speculative decoding.
++    LLAMA_API int32_t llama_n_medusa_heads(const struct llama_model * model);
++
++    // Number of residual blocks per head. Typically 1.
++    LLAMA_API int32_t llama_n_medusa_layers(const struct llama_model * model);
++
++    // After llama_decode, return the logits produced by Medusa head `k` for
++    // batch token index `i` (same indexing semantics as llama_get_logits_ith).
++    // Returns NULL if the model has no Medusa heads or indices are out of
++    // range. The returned buffer holds [n_vocab] floats.
++    LLAMA_API float * llama_get_medusa_logits_ith(
++            struct llama_context * ctx,
++                          int32_t  k,
++                          int32_t  i);
++
++    // A sparse Medusa speculation tree. The caller owns the storage and must
++    // keep it alive for the duration of llama_decode() calls that use it.
++    //   n_nodes: must equal llama_batch.n_tokens for the verify pass
++    //   parent[i]: index of node i's parent in the same batch, or -1 for root
++    //   depth[i]:  distance from the root (root has depth 0)
++    // See docs/MEDUSA_BITNET_CPP_DESIGN.md §5 for the full semantics.
++    struct llama_medusa_tree {
++        int32_t         n_nodes;
++        const int32_t * parent;
++        const int32_t * depth;
++    };
++
++    // Enable (or disable with NULL) tree-attention masking for the next
++    // llama_decode calls. When set, llama_set_inputs consults the tree
++    // structure to populate inp_KQ_mask instead of the default causal rule.
++    LLAMA_API void llama_set_tree_attention(
++            struct llama_context           * ctx,
++            const struct llama_medusa_tree * tree);
++
+     // Get all output token embeddings.
+     // when pooling_type == LLAMA_POOLING_TYPE_NONE or when using a generative model,
+     // the embeddings for which llama_batch.logits[i] != 0 are stored contiguously
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 666fcc4..7ee007e 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -2942,6 +2942,13 @@ struct llama_model {
+     struct ggml_tensor * output_b;
+     struct ggml_tensor * output_norm_enc;
+ 
++    // Medusa heads (optional). Zero-sized on models without medusa metadata.
++    // Indexed as [k * n_medusa_layers_per_head + l].
++    int32_t n_medusa_heads           = 0;
++    int32_t n_medusa_layers_per_head = 0;
++    std::vector<struct ggml_tensor *> medusa_w_in;
++    std::vector<struct ggml_tensor *> medusa_w_out;
++
+     // classifier
+     struct ggml_tensor * cls;
+     struct ggml_tensor * cls_b;
+@@ -3439,6 +3446,15 @@ struct llama_context {
+     struct ggml_tensor * inp_pos_bucket;    // I32 [n_batch|n_kv, n_batch]
+     struct ggml_tensor * inp_embd_enc;      // F32 [n_embd, n_outputs_enc]
+     struct ggml_tensor * inp_KQ_mask_cross; // F32 [n_outputs_enc, n_batch]
++
++    // ---- Medusa speculative decoding ----
++    // Populated by llama_decode_internal when the loaded model has heads.
++    // Outer dim = n_medusa_heads; inner = n_outputs * n_vocab floats per head.
++    std::vector<std::vector<float>> medusa_logits;
++
++    // Optional tree structure consulted by llama_set_inputs when building
++    // inp_KQ_mask. NULL means "use the default causal mask".
++    const struct llama_medusa_tree * medusa_tree = nullptr;
+ };
+ 
+ struct llama_lora_weight {
+@@ -8683,6 +8699,40 @@ static bool llm_load_tensors(
+                         model.output_norm = ml.create_tensor(ctx_output,       tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd});
+                     }
+ 
++                    // Optional Medusa heads — mirror of the LLM_ARCH_BITNET_B158
++                    // loader, so older BitNet GGUFs can also carry Medusa.
++                    // Medusa + BitNet integration by Parrish Corcoran
++                    // (MedusaBitNet project).
++                    {
++                        uint32_t n_heads_kv  = 0;
++                        uint32_t n_layers_kv = 0;
++                        const bool ok_heads  = ml.get_key("medusa.n_heads",           n_heads_kv,  false);
++                        const bool ok_layers = ml.get_key("medusa.n_layers_per_head", n_layers_kv, false);
++                        if (ok_heads && ok_layers && n_heads_kv > 0) {
++                            model.n_medusa_heads           = (int32_t) n_heads_kv;
++                            model.n_medusa_layers_per_head = (int32_t) n_layers_kv;
++
++                            const int n_mh = model.n_medusa_heads * model.n_medusa_layers_per_head;
++                            model.medusa_w_in .resize(n_mh, nullptr);
++                            model.medusa_w_out.resize(n_mh, nullptr);
++
++                            for (int k = 0; k < model.n_medusa_heads; ++k) {
++                                for (int l = 0; l < model.n_medusa_layers_per_head; ++l) {
++                                    char buf_in[128], buf_out[128];
++                                    snprintf(buf_in,  sizeof(buf_in),
++                                             "medusa.head.%d.layer.%d.w_in.weight", k, l);
++                                    snprintf(buf_out, sizeof(buf_out),
++                                             "medusa.head.%d.layer.%d.w_out.weight", k, l);
++                                    const int idx = k * model.n_medusa_layers_per_head + l;
++                                    model.medusa_w_in [idx] = ml.create_tensor(ctx_output_split, buf_in,  {n_embd, n_embd});
++                                    model.medusa_w_out[idx] = ml.create_tensor(ctx_output_split, buf_out, {n_embd, n_embd});
++                                }
++                            }
++                            LLAMA_LOG_INFO("%s: loaded %d Medusa heads, %d layer(s) each (LLM_ARCH_BITNET)\n",
++                                           __func__, model.n_medusa_heads, model.n_medusa_layers_per_head);
++                        }
++                    }
++
+                     for (int i = 0; i < n_layer; ++i) {
+                         ggml_context * ctx_layer = ctx_for_layer(i);
+                         ggml_context * ctx_split = ctx_for_layer_split(i);
+@@ -8730,6 +8780,42 @@ static bool llm_load_tensors(
+                         }
+                     }
+ 
++                    // Optional Medusa heads (Linear -> SiLU -> Linear residual
++                    // blocks on top of the final hidden state). Loaded only if
++                    // the GGUF carries the `medusa.*` metadata keys.
++                    //
++                    // Medusa + BitNet integration by Parrish Corcoran
++                    // (MedusaBitNet project).
++                    {
++                        uint32_t n_heads_kv  = 0;
++                        uint32_t n_layers_kv = 0;
++                        const bool ok_heads  = ml.get_key("medusa.n_heads",           n_heads_kv,  false);
++                        const bool ok_layers = ml.get_key("medusa.n_layers_per_head", n_layers_kv, false);
++                        if (ok_heads && ok_layers && n_heads_kv > 0) {
++                            model.n_medusa_heads           = (int32_t) n_heads_kv;
++                            model.n_medusa_layers_per_head = (int32_t) n_layers_kv;
++
++                            const int n_mh = model.n_medusa_heads * model.n_medusa_layers_per_head;
++                            model.medusa_w_in .resize(n_mh, nullptr);
++                            model.medusa_w_out.resize(n_mh, nullptr);
++
++                            for (int k = 0; k < model.n_medusa_heads; ++k) {
++                                for (int l = 0; l < model.n_medusa_layers_per_head; ++l) {
++                                    char buf_in[128], buf_out[128];
++                                    snprintf(buf_in,  sizeof(buf_in),
++                                             "medusa.head.%d.layer.%d.w_in.weight", k, l);
++                                    snprintf(buf_out, sizeof(buf_out),
++                                             "medusa.head.%d.layer.%d.w_out.weight", k, l);
++                                    const int idx = k * model.n_medusa_layers_per_head + l;
++                                    model.medusa_w_in [idx] = ml.create_tensor(ctx_output_split, buf_in,  {n_embd, n_embd});
++                                    model.medusa_w_out[idx] = ml.create_tensor(ctx_output_split, buf_out, {n_embd, n_embd});
++                                }
++                            }
++                            LLAMA_LOG_INFO("%s: loaded %d Medusa heads, %d layer(s) each\n",
++                                           __func__, model.n_medusa_heads, model.n_medusa_layers_per_head);
++                        }
++                    }
++
+                     for (int i = 0; i < n_layer; ++i) {
+                         ggml_context * ctx_layer = ctx_for_layer(i);
+                         ggml_context * ctx_split = ctx_for_layer_split(i);
+@@ -15378,8 +15464,34 @@ struct llm_build_context {
+                 LLM_NORM_RMS, cb, -1);
+         cb(cur, "result_norm", -1);
+ 
+-        // lm_head
+-        cur = llm_build_lora_mm(lctx, ctx0, model.tok_embd, cur);
++        // Tap post-norm hidden state for Medusa (see build_bitnet_158 for the
++        // detailed comment).
++        struct ggml_tensor * h_final = cur;
++
++        // Medusa heads expanded BEFORE result_output so the main head stays last.
++        if (model.n_medusa_heads > 0) {
++            const int K = model.n_medusa_heads;
++            const int L = model.n_medusa_layers_per_head;
++            for (int k = 0; k < K; ++k) {
++                struct ggml_tensor * h = h_final;
++                for (int l = 0; l < L; ++l) {
++                    const int idx = k * L + l;
++                    struct ggml_tensor * z = ggml_mul_mat(ctx0, model.medusa_w_in[idx], h);
++                    z = ggml_silu(ctx0, z);
++                    z = ggml_mul_mat(ctx0, model.medusa_w_out[idx], z);
++                    h = ggml_add(ctx0, h, z);
++                }
++                struct ggml_tensor * medusa_logits =
++                    llm_build_lora_mm(lctx, ctx0, model.tok_embd, h);
++                char name[64];
++                snprintf(name, sizeof(name), "result_medusa_%d", k);
++                cb(medusa_logits, name, -1);
++                ggml_build_forward_expand(gf, medusa_logits);
++            }
++        }
++
++        // lm_head (must be expanded last)
++        cur = llm_build_lora_mm(lctx, ctx0, model.tok_embd, h_final);
+         cb(cur, "result_output", -1);
+ 
+         ggml_build_forward_expand(gf, cur);
+@@ -15526,11 +15638,47 @@ struct llm_build_context {
+                 LLM_NORM_RMS, cb, -1);
+         cb(cur, "result_norm", -1);
+ 
+-        // lm_head
+-        cur = llm_build_lora_mm(lctx, ctx0, model.tok_embd, cur);
++        // Tap the final post-norm hidden state BEFORE the main LM head so
++        // Medusa heads can read it. Shape: [n_embd, n_outputs].
++        struct ggml_tensor * h_final = cur;
++
++        // ---- optional Medusa heads ----
++        // Each head is a (Linear -> SiLU -> Linear) residual block applied to
++        // the shared post-norm hidden state, then projected to the vocab via
++        // the tied LM head (model.tok_embd). The k head outputs become extra
++        // nodes expanded into the compute graph and are retrieved by name
++        // (`result_medusa_<k>`) after compute.
++        //
++        // IMPORTANT: Medusa nodes are expanded into the graph BEFORE the main
++        // `result_output` so that `result_output` remains the last node in the
++        // graph, preserving llama_decode_internal's assumption that
++        // ggml_graph_node(gf, -1) is the main logits tensor.
++        if (model.n_medusa_heads > 0) {
++            const int K = model.n_medusa_heads;
++            const int L = model.n_medusa_layers_per_head;
++            for (int k = 0; k < K; ++k) {
++                struct ggml_tensor * h = h_final;
++                for (int l = 0; l < L; ++l) {
++                    const int idx = k * L + l;
++                    struct ggml_tensor * z =
++                        ggml_mul_mat(ctx0, model.medusa_w_in[idx], h);
++                    z = ggml_silu(ctx0, z);
++                    z = ggml_mul_mat(ctx0, model.medusa_w_out[idx], z);
++                    h = ggml_add(ctx0, h, z);
++                }
++                // Tied-LM-head vocab projection. Matches the main head below.
++                struct ggml_tensor * medusa_logits =
++                    llm_build_lora_mm(lctx, ctx0, model.tok_embd, h);
++                char name[64];
++                snprintf(name, sizeof(name), "result_medusa_%d", k);
++                cb(medusa_logits, name, -1);
++                ggml_build_forward_expand(gf, medusa_logits);
++            }
++        }
+ 
++        // lm_head (MUST be expanded last so result_output is the last node)
++        cur = llm_build_lora_mm(lctx, ctx0, model.tok_embd, h_final);
+         cb(cur, "result_output", -1);
+-
+         ggml_build_forward_expand(gf, cur);
+ 
+         return gf;
+@@ -17688,6 +17836,41 @@ static int llama_decode_internal(
+             }
+         }
+ 
++        // ---- extract Medusa head logits (optional) ----
++        // Each Medusa head tensor is named "result_medusa_<k>" in the graph
++        // and has shape [n_vocab, n_outputs] like result_output. We retrieve
++        // by name and copy into ctx->medusa_logits[k] for the public accessor.
++        if (model.n_medusa_heads > 0 && lctx.n_outputs > 0) {
++            if ((int) lctx.medusa_logits.size() != model.n_medusa_heads) {
++                lctx.medusa_logits.assign(model.n_medusa_heads, std::vector<float>());
++            }
++            const int32_t n_outputs_new = lctx.n_outputs;
++            for (int k = 0; k < model.n_medusa_heads; ++k) {
++                char name[64];
++                snprintf(name, sizeof(name), "result_medusa_%d", k);
++                struct ggml_tensor * mt = nullptr;
++                for (int i = ggml_graph_n_nodes(gf) - 1; i >= 0; --i) {
++                    if (strcmp(ggml_graph_node(gf, i)->name, name) == 0) {
++                        mt = ggml_graph_node(gf, i);
++                        break;
++                    }
++                }
++                GGML_ASSERT(mt != nullptr && "missing medusa result tensor");
++
++                const size_t total = (size_t) n_outputs * n_vocab;
++                if (lctx.medusa_logits[k].size() < total) {
++                    lctx.medusa_logits[k].resize(total);
++                }
++                ggml_backend_t backend_mt =
++                    ggml_backend_sched_get_tensor_backend(lctx.sched, mt);
++                GGML_ASSERT(backend_mt != nullptr);
++                float * out = lctx.medusa_logits[k].data() + n_outputs_prev * n_vocab;
++                ggml_backend_tensor_get_async(
++                    backend_mt, mt, out, 0,
++                    (size_t) n_outputs_new * n_vocab * sizeof(float));
++            }
++        }
++
+         // extract embeddings
+         if (embd) {
+             ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(lctx.sched, embd);
+@@ -21671,6 +21854,47 @@ float * llama_get_logits_ith(struct llama_context * ctx, int32_t i) {
+     }
+ }
+ 
++// ============================================================================
++// Medusa speculative decoding API (BitNet + Medusa by Parrish Corcoran)
++// ============================================================================
++
++int32_t llama_n_medusa_heads(const struct llama_model * model) {
++    return model ? model->n_medusa_heads : 0;
++}
++
++int32_t llama_n_medusa_layers(const struct llama_model * model) {
++    return model ? model->n_medusa_layers_per_head : 0;
++}
++
++float * llama_get_medusa_logits_ith(struct llama_context * ctx, int32_t k, int32_t i) {
++    if (ctx == nullptr) return nullptr;
++    if (k < 0 || k >= ctx->model.n_medusa_heads)            return nullptr;
++    if ((int) ctx->medusa_logits.size() <= k)               return nullptr;
++    if (ctx->medusa_logits[k].empty())                      return nullptr;
++
++    llama_synchronize(ctx);
++
++    int32_t j = -1;
++    if (i < 0) {
++        j = ctx->n_outputs + i;
++        if (j < 0) return nullptr;
++    } else if ((size_t) i >= ctx->output_ids.size()) {
++        return nullptr;
++    } else {
++        j = ctx->output_ids[i];
++    }
++    if (j < 0 || j >= ctx->n_outputs) return nullptr;
++
++    const int64_t n_vocab = ctx->model.hparams.n_vocab;
++    if ((size_t)(j + 1) * n_vocab > ctx->medusa_logits[k].size()) return nullptr;
++    return ctx->medusa_logits[k].data() + (size_t) j * n_vocab;
++}
++
++void llama_set_tree_attention(struct llama_context * ctx, const struct llama_medusa_tree * tree) {
++    if (ctx == nullptr) return;
++    ctx->medusa_tree = tree;
++}
++
+ float * llama_get_embeddings(struct llama_context * ctx) {
+     llama_synchronize(ctx);
+ 
