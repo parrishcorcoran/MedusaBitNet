@@ -101,6 +101,12 @@ class TrainConfig:
     cached_hidden_path: str = ""
     cached_lm_head_path: str = ""
 
+    # Compute device. "cpu" works everywhere (default). On a machine with a
+    # CUDA/ROCm-capable GPU (e.g. AMD Strix Halo iGPU via ROCm) pass --device cuda
+    # to run the head math on the accelerator; the cached hidden bin stays
+    # mmapped in CPU RAM and only the current micro-batch is shipped to device.
+    device: str = "cpu"
+
     # Model
     backbone: str = "microsoft/bitnet-b1.58-2B-4T"
     num_heads: int = 4
@@ -234,6 +240,9 @@ def main():
             drop_last=True,
         )
 
+    device = torch.device(cfg.device)
+    print(f"[train] device = {device}")
+
     # ---- Model --------------------------------------------------------------
     if cached_mode:
         heads = MedusaHeads(
@@ -247,6 +256,7 @@ def main():
         model = heads  # only the heads exist in this mode
         # Register lm_head_weight as a non-trainable buffer for forward use.
         model.register_buffer("_lm_head_weight", lm_head_weight, persistent=False)
+        model.to(device)
         trainable_params = list(model.parameters())
     else:
         model_cfg = MedusaConfig(
@@ -295,7 +305,16 @@ def main():
 
         if cached_mode:
             hidden, targets = batch  # hidden [B,T,H] bf16, targets [B,T+1] int64
-            with torch.cpu.amp.autocast(dtype=torch.bfloat16):
+            hidden  = hidden.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            # Autocast context: CPU path uses torch.cpu.amp.autocast; on CUDA/ROCm
+            # we use plain bf16 forward (tensors already bf16).
+            if device.type == "cpu":
+                ctx = torch.cpu.amp.autocast(dtype=torch.bfloat16)
+            else:
+                from contextlib import nullcontext
+                ctx = nullcontext()
+            with ctx:
                 medusa_logits = model(hidden, model._lm_head_weight)
                 loss, head_accs = medusa_loss(medusa_logits, targets, cfg.num_heads)
                 loss = loss / cfg.grad_accum_steps
