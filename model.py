@@ -77,14 +77,25 @@ class MedusaHeads(nn.Module):
                 nn.init.kaiming_uniform_(self.w_in[layer, head], a=5 ** 0.5)
         # w_out stays zero-initialized (identity start).
 
-    def forward(self, hidden: torch.Tensor, lm_head_weight: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        pos_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Args:
             hidden: [B, T, H] final hidden state from the frozen backbone.
             lm_head_weight: [V, H] vocab projection (shared with backbone).
+            pos_indices: optional [B, P] int64 tensor of position indices to
+                project. When given, residual blocks still run on all T
+                positions (cheap), but the expensive vocab projection only
+                runs on the P selected positions. Used at train time to
+                amortise the [T, V] matmul via random-position subsampling.
+                When None, all T positions are projected (inference default).
 
         Returns:
-            logits: [B, T, k, V] — one set of vocab logits per head position.
+            logits: [B, P, k, V] if pos_indices is given, else [B, T, k, V].
         """
         # Broadcast hidden across the k heads: [B, T, 1, H] -> [B, T, k, H]
         x = hidden.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
@@ -98,8 +109,18 @@ class MedusaHeads(nn.Module):
             hidden_proj = torch.einsum("bthi,hio->btho", hidden_proj, self.w_out[layer])
             x = x + hidden_proj
 
+        # Optional position subsampling BEFORE the vocab projection. This is
+        # where the 8x training speedup comes from: we avoid computing the
+        # [B, T, k, V] matmul for positions we won't train on this step.
+        if pos_indices is not None:
+            B, T, K, H = x.shape
+            P = pos_indices.shape[1]
+            # Broadcast pos_indices to [B, P, K, H] for torch.gather.
+            idx = pos_indices.view(B, P, 1, 1).expand(-1, -1, K, H)
+            x = torch.gather(x, 1, idx)  # [B, P, k, H]
+
         # Single fused projection to vocab for all k heads.
-        # [B, T, k, H] @ [H, V] -> [B, T, k, V]
+        # [B, T or P, k, H] @ [H, V] -> [B, T or P, k, V]
         logits = torch.einsum("bthi,iv->bthv", x, lm_head_weight.t())
         return logits
 
