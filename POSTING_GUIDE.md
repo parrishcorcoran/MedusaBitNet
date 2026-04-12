@@ -8,21 +8,44 @@
 
 ---
 
+## Credits & Acknowledgments
+
+This project builds directly on the work of two teams. Tag them, thank them, credit them.
+
+### Medusa Team (Princeton / Together AI / UIUC)
+- **Paper:** "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads" (ICML 2024)
+- **Authors:** Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, Tri Dao
+- **Code:** [FasterDecoding/Medusa](https://github.com/FasterDecoding/Medusa) — Apache 2.0 license
+- **X handles:** **@tianle_cai** (lead author), **@tri_dao** (Tri Dao, Together AI / FlashAttention creator)
+
+### BitNet Team (Microsoft Research)
+- **Paper:** "The Era of 1-bit LLMs" + "BitNet b1.58"
+- **Model:** [microsoft/BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T) — MIT license
+- **Code:** [microsoft/BitNet](https://github.com/microsoft/BitNet) — MIT license
+
+### Infrastructure
+- **llama.cpp** by Georgi Gerganov et al. — MIT license
+- **Claude Code** (Anthropic, Opus 4.6) — coding partner for the entire build
+
+### Licensing
+All components are MIT or Apache 2.0. MedusaBitNet itself is MIT licensed. No copyright issues — everything is fully open source and permissively licensed.
+
+---
+
 ## Who To Tag
 
-### Must-tag (directly relevant):
-- **@AMD** — Built on their Strix Halo (Ryzen AI MAX+ 395). This is the best advertisement for their APU platform.
-- **@MSFTResearch** / **@Microsoft** — We used their BitNet b1.58 2B-4T model. This is the first time anyone has added speculative decoding to it.
-- **@ggaborit** (Tianqi Chen, BitNet lead at Microsoft) — if identifiable on X
-- **@aaborit** or whoever manages the BitNet GitHub
+### Must-tag (the teams whose work this builds on):
+- **@tianle_cai** — Medusa lead author. Thank him directly for the technique.
+- **@tri_dao** — Medusa co-author, FlashAttention creator. Efficiency research legend.
+- **@MSFTResearch** / **@Microsoft** — BitNet b1.58 2B-4T model and bitnet.cpp
+- **@AMD** — Built on their Strix Halo (Ryzen AI MAX+ 395)
 
 ### Should-tag (amplification):
-- **@kaborit** / **@llaborit** — llama.cpp maintainers (our C++ patch builds on their codebase)
-- **@AnthropicAI** — Claude Code (Opus 4.6) was the coding partner for the entire project
-- **@huggingface** — model hosted there, training used their libraries
+- **@AnthropicAI** — Claude Code (Opus 4.6) was the coding partner
+- **@huggingface** — model hosting + training libraries
+- **@ggaborit** / **@ggerganov** — llama.cpp maintainer (C++ patch builds on their codebase)
 - **@_akhaliq** — ML news aggregator, frequently surfaces novel research
 - **@reach_vb** — HuggingFace community manager
-- **@osaborit** / AI Twitter influencers who cover efficiency research
 
 ### Hashtags:
 `#BitNet #MedusaBitNet #AI #LLM #EfficientAI #SpeculativeDecoding #AMD #StrixHalo #OpenSource`
@@ -37,11 +60,11 @@
 >
 > 13 millijoules per token. 20x less energy than LLaMA 3.2.
 >
-> It's called MedusaBitNet — the first speculative decoding on ternary weights.
+> MedusaBitNet — first speculative decoding on ternary weights.
 >
-> Built on @AMD Strix Halo. Using @Microsoft's BitNet b1.58.
+> Built on @AMD Strix Halo. @Microsoft's BitNet + @tianle_cai's Medusa.
 >
-> Thread 🧵
+> Huge thanks to both teams. Thread 🧵
 
 **Image:** `figures/hero_summary.png`
 
@@ -139,9 +162,27 @@
 
 ---
 
-### Post 8: The Challenge / Verification
+### Post 8: Credits & Thanks
 
-> @gaborit I want to verify this claim:
+> None of this exists without:
+>
+> @tianle_cai @tri_dao and team — Medusa speculative decoding (ICML 2024). Brilliant technique, Apache 2.0 licensed. Thank you.
+>
+> @MSFTResearch — BitNet b1.58 2B-4T. Ternary weights that actually work. MIT licensed. Thank you.
+>
+> @ggerganov — llama.cpp. The backbone of edge inference.
+>
+> @AnthropicAI Claude Code — my coding partner for the entire build.
+>
+> Standing on shoulders of giants. All open source. 🙏
+
+**No image — pure gratitude post. This matters for engagement and credibility.**
+
+---
+
+### Post 9: The Challenge / Verification
+
+> I want to verify this claim:
 >
 > Is MedusaBitNet the most energy-efficient LLM inference at 2B+ scale?
 >
@@ -155,7 +196,7 @@
 
 ---
 
-### Post 9: Ask Grok to Verify
+### Post 10: Ask Grok to Verify
 
 > @grok Is 13 millijoules per token the most energy-efficient LLM inference ever demonstrated at 2B+ parameter scale?
 >
@@ -169,7 +210,7 @@
 
 ---
 
-### Post 10: Ask Grok (More Specific)
+### Post 11: Ask Grok (More Specific)
 
 > @grok Compare energy efficiency:
 > - MedusaBitNet: 13 mJ/token, 2B params, 54.19 avg score
