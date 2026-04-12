@@ -1,0 +1,115 @@
+{
+  "system": {
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "threads": 16,
+    "estimated_power_w": 55,
+    "gpu_idle_w": 19.034
+  },
+  "model": {
+    "name": "BitNet b1.58 2B-4T",
+    "size_mb": 1187.310112,
+    "quantization": "I2_S",
+    "params_b": 2.4
+  },
+  "vanilla": {
+    "gen_tok_s": 70.65875,
+    "prefill_tok_s": 418.80875000000003,
+    "tokens_per_watt": 1.2847045454545454,
+    "joules_per_token": 0.7783890884002336
+  },
+  "medusa": {
+    "speedup": 2.21,
+    "effective_gen_tok_s": 156.1558375,
+    "tokens_per_watt": 2.8391970454545454,
+    "joules_per_token": 0.3522122571946758,
+    "head_acceptance_rates": [
+      0.676,
+      0.332,
+      0.142,
+      0.063
+    ],
+    "model_overhead_mb": 13
+  },
+  "runs": [
+    {
+      "prompt": "The theory of general relativity explains that gra",
+      "gen_tokens": 255,
+      "gen_tok_s": 72.85,
+      "gen_ms": 3500.54,
+      "wall_time_s": 4.037447690963745,
+      "gpu_power_w": 55.56399999999999,
+      "prefill_tok_s": 409.07,
+      "prefill_tokens": 11
+    },
+    {
+      "prompt": "In machine learning, the backpropagation algorithm",
+      "gen_tokens": 255,
+      "gen_tok_s": 73.06,
+      "gen_ms": 3490.44,
+      "wall_time_s": 4.035763740539551,
+      "gpu_power_w": 93.0945,
+      "prefill_tok_s": 524.36,
+      "prefill_tokens": 12
+    },
+    {
+      "prompt": "The process of photosynthesis in plants begins whe",
+      "gen_tokens": 255,
+      "gen_tok_s": 70.89,
+      "gen_ms": 3597.27,
+      "wall_time_s": 4.124392509460449,
+      "gpu_power_w": 88.07650000000001,
+      "prefill_tok_s": 384.99,
+      "prefill_tokens": 11
+    },
+    {
+      "prompt": "Quantum computing differs from classical computing",
+      "gen_tokens": 255,
+      "gen_tok_s": 70.03,
+      "gen_ms": 3641.47,
+      "wall_time_s": 4.179380416870117,
+      "gpu_power_w": 81.052,
+      "prefill_tok_s": 422.67,
+      "prefill_tokens": 12
+    },
+    {
+      "prompt": "The French Revolution of 1789 was triggered by a c",
+      "gen_tokens": 255,
+      "gen_tok_s": 69.49,
+      "gen_ms": 3669.71,
+      "wall_time_s": 4.209581136703491,
+      "gpu_power_w": 80.052,
+      "prefill_tok_s": 429.87,
+      "prefill_tokens": 14
+    },
+    {
+      "prompt": "To implement a binary search tree in Python, you f",
+      "gen_tokens": 255,
+      "gen_tok_s": 69.95,
+      "gen_ms": 3645.56,
+      "wall_time_s": 4.1900246143341064,
+      "gpu_power_w": 80.05000000000001,
+      "prefill_tok_s": 375.65,
+      "prefill_tokens": 14
+    },
+    {
+      "prompt": "The human immune system fights infections through ",
+      "gen_tokens": 255,
+      "gen_tok_s": 69.35,
+      "gen_ms": 3676.87,
+      "wall_time_s": 4.23237681388855,
+      "gpu_power_w": 80.04650000000001,
+      "prefill_tok_s": 374.29,
+      "prefill_tokens": 11
+    },
+    {
+      "prompt": "Climate change is primarily driven by greenhouse g",
+      "gen_tokens": 255,
+      "gen_tok_s": 69.65,
+      "gen_ms": 3661.33,
+      "wall_time_s": 4.202062129974365,
+      "gpu_power_w": 80.0505,
+      "prefill_tok_s": 429.57,
+      "prefill_tokens": 11
+    }
+  ]
+}
