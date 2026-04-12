@@ -118,7 +118,9 @@ def main():
         for l in range(num_layers_per_head):
             for which, src in (("w_in", w_in), ("w_out", w_out)):
                 name = f"medusa.head.{k}.layer.{l}.{which}.weight"
-                arr = _torch_to_np(src[l, k], args.dtype)
+                # Transpose: Python einsum uses [input, output] but GGML's
+                # ggml_mul_mat expects [output, input] (row-major).
+                arr = _torch_to_np(src[l, k].T.contiguous(), args.dtype)
                 writer.add_tensor(name, arr)
                 print(f"[convert]   + {name}  shape={arr.shape}  dtype={arr.dtype}")
 
