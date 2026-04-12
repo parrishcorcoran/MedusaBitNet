@@ -120,8 +120,16 @@ class MedusaHeads(nn.Module):
             x = torch.gather(x, 1, idx)  # [B, P, k, H]
 
         # Single fused projection to vocab for all k heads.
+        # lm_head_weight can be [V, H] or [H, V] (pre-transposed).
+        # If [V, H], transpose + contiguous to avoid non-contiguous .t() view
+        # that prevents BLAS dispatch in the einsum.
+        if lm_head_weight.shape[0] > lm_head_weight.shape[1]:
+            # [V, H] -> [H, V] contiguous
+            w = lm_head_weight.t().contiguous()
+        else:
+            w = lm_head_weight
         # [B, T or P, k, H] @ [H, V] -> [B, T or P, k, V]
-        logits = torch.einsum("bthi,iv->bthv", x, lm_head_weight.t())
+        logits = torch.einsum("bthi,iv->bthv", x, w)
         return logits
 
 

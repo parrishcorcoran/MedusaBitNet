@@ -15,14 +15,19 @@ each NUMA node — with disjoint [--start, --end) ranges.
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Don't blank CUDA_VISIBLE_DEVICES — allow --device cuda for iGPU.
 
 import argparse
 import time
 
 import numpy as np
 import torch
-import intel_extension_for_pytorch as ipex  # noqa: F401
+try:
+    import intel_extension_for_pytorch as ipex
+    HAS_IPEX = True
+except ImportError:
+    ipex = None
+    HAS_IPEX = False
 from transformers import AutoModelForCausalLM
 
 from dataset import PackedTokenDataset
@@ -39,6 +44,8 @@ def parse_args():
     p.add_argument("--out", required=True)
     p.add_argument("--lm_head_out", default="",
                    help="if set, also save backbone's lm_head weight to this path")
+    p.add_argument("--device", default="cpu",
+                   help="cpu or cuda (ROCm iGPU via HIP)")
     return p.parse_args()
 
 
@@ -63,12 +70,16 @@ def main():
     for p_ in backbone.parameters():
         p_.requires_grad_(False)
 
-    # IPEX inference-mode optimization: op fusion, weight prepack, AVX-512 bf16.
-    try:
-        backbone = ipex.optimize(backbone, dtype=torch.bfloat16, inplace=True)
-        print("[cache] ipex.optimize applied", flush=True)
-    except Exception as e:
-        print(f"[cache] ipex.optimize unavailable: {e}", flush=True)
+    device = torch.device(args.device)
+    if device.type != "cpu":
+        backbone = backbone.to(device)
+        print(f"[cache] backbone moved to {device}", flush=True)
+    elif HAS_IPEX:
+        try:
+            backbone = ipex.optimize(backbone, dtype=torch.bfloat16, inplace=True)
+            print("[cache] ipex.optimize applied", flush=True)
+        except Exception as e:
+            print(f"[cache] ipex.optimize unavailable: {e}", flush=True)
 
     hidden_size = backbone.config.hidden_size
     print(f"[cache] range=[{start},{end}) n={n} seq_len={args.seq_len} "
@@ -93,7 +104,7 @@ def main():
             for batch_start in range(start, end, args.batch_size):
                 batch_end = min(batch_start + args.batch_size, end)
                 rows = [dataset[i][: args.seq_len] for i in range(batch_start, batch_end)]
-                input_ids = torch.stack(rows, dim=0)  # [B, T] int64
+                input_ids = torch.stack(rows, dim=0).to(device)  # [B, T] int64
 
                 out = backbone(
                     input_ids=input_ids,

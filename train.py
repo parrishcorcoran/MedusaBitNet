@@ -20,9 +20,14 @@ Medusa loss:
     and take cross-entropy. We log top-1 accuracy per head to W&B.
 """
 
-# ---- CPU-only guardrail: MUST be first, before any torch import ----------
+# ---- GPU guardrail: hide the tiny display GPU on machines like the Z8 G4.
+# On machines with a real GPU or usable iGPU (e.g. Strix Halo via ROCm),
+# the --device cuda flag opts in explicitly, so we only blank the variable
+# when training will be CPU-only.
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Don't blanket-hide GPUs — let --device cuda work.  The old Z8 guardrail
+# (CUDA_VISIBLE_DEVICES="") is moved into the launcher script where it
+# belongs, and only for machines that genuinely have a display-only GPU.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "0")
 # --------------------------------------------------------------------------
 
@@ -36,7 +41,14 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
-import intel_extension_for_pytorch as ipex  # noqa: F401  (AVX-512 fusion)
+# IPEX is optional — provides AVX-512 bf16 fusion on Intel CPUs.
+# On AMD Zen 5 (native avx512_bf16) or ROCm iGPU paths, it's not needed.
+try:
+    import intel_extension_for_pytorch as ipex  # noqa: F401
+    HAS_IPEX = True
+except ImportError:
+    ipex = None
+    HAS_IPEX = False
 
 import numpy as np
 
@@ -236,7 +248,10 @@ def main():
         print(f"[train] cached-hidden mode: {cfg.cached_hidden_path}")
         lm_head_weight = torch.load(cfg.cached_lm_head_path, map_location="cpu")
         lm_head_weight = lm_head_weight.to(torch.bfloat16).contiguous()
-        vocab_size, hidden_size = lm_head_weight.shape
+        # Pre-transpose [V, H] -> [H, V] once so the forward einsum gets a
+        # contiguous tensor and dispatches to BLAS instead of looping.
+        lm_head_weight = lm_head_weight.t().contiguous()
+        hidden_size, vocab_size = lm_head_weight.shape  # now [H, V]
         dataset = CachedHiddenDataset(
             cfg.cached_hidden_path, cfg.bin_path, cfg.seq_len, hidden_size,
         )
@@ -306,12 +321,25 @@ def main():
         betas=(0.9, 0.95),
     )
 
-    # ---- IPEX fusion. torch.compile stays off: inductor lowers BitNet's
-    # packed uint8 weights into a raw mm(bf16, uint8) that crashes at runtime.
-    if not cached_mode:
+    # ---- IPEX fusion + torch.compile ----
+    # In cached mode the BitNet backbone is absent, so torch.compile is safe.
+    # In non-cached mode, torch.compile crashes on BitNet's packed uint8 weights.
+    if HAS_IPEX and device.type == "cpu":
         model, optim = ipex.optimize(
             model, optimizer=optim, dtype=torch.bfloat16, inplace=True,
         )
+        print("[train] ipex.optimize applied")
+    else:
+        print(f"[train] ipex.optimize skipped (HAS_IPEX={HAS_IPEX}, device={device})")
+
+    if cached_mode and device.type == "cpu":
+        try:
+            backend = "ipex" if HAS_IPEX else "inductor"
+            model = torch.compile(model, backend=backend)
+            print(f"[train] torch.compile(backend='{backend}') enabled (cached mode, no BitNet weights)")
+        except Exception as e:
+            print(f"[train] torch.compile unavailable, eager mode: {e}")
+    elif not cached_mode:
         print("[train] torch.compile disabled (BitNet packed-weight incompat), running eager")
 
     scheduler = CosineAnnealingLR(optim, T_max=max(1, cfg.max_steps - cfg.warmup_steps))
@@ -353,8 +381,7 @@ def main():
             if device.type == "cpu":
                 ctx = torch.cpu.amp.autocast(dtype=torch.bfloat16)
             else:
-                from contextlib import nullcontext
-                ctx = nullcontext()
+                ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
             with ctx:
                 medusa_logits = model(hidden, model._lm_head_weight, pos_indices=pos_indices)
                 loss, head_accs = medusa_loss(
