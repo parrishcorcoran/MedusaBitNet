@@ -1,0 +1,242 @@
+{
+  "results": [
+    {
+      "name": "BitNet b1.58 2B-4T (I2_S)",
+      "model_path": "/home/cpinchington/MedusaBitNet/models/bitnet-b1.58-2B-4T/ggml-model-i2_s.gguf",
+      "model_size_mb": 1187.310112,
+      "n_runs": 8,
+      "avg_gen_tok_s": 72.73875,
+      "avg_prefill_tok_s": 434.95375,
+      "avg_ms_per_tok": 13.75375,
+      "runs": [
+        {
+          "gen_tok_s": 75.47,
+          "gen_ms_per_tok": 13.25,
+          "prefill_tok_s": 473.97,
+          "wall_time": 3.8744120597839355
+        },
+        {
+          "gen_tok_s": 74.61,
+          "gen_ms_per_tok": 13.4,
+          "prefill_tok_s": 400.33,
+          "wall_time": 3.946519613265991
+        },
+        {
+          "gen_tok_s": 73.39,
+          "gen_ms_per_tok": 13.63,
+          "prefill_tok_s": 468.56,
+          "wall_time": 3.981218099594116
+        },
+        {
+          "gen_tok_s": 71.47,
+          "gen_ms_per_tok": 13.99,
+          "prefill_tok_s": 403.88,
+          "wall_time": 4.082836866378784
+        },
+        {
+          "gen_tok_s": 71.75,
+          "gen_ms_per_tok": 13.94,
+          "prefill_tok_s": 425.03,
+          "wall_time": 4.0725319385528564
+        },
+        {
+          "gen_tok_s": 71.9,
+          "gen_ms_per_tok": 13.91,
+          "prefill_tok_s": 399.68,
+          "wall_time": 4.0745580196380615
+        },
+        {
+          "gen_tok_s": 71.23,
+          "gen_ms_per_tok": 14.04,
+          "prefill_tok_s": 466.73,
+          "wall_time": 4.097683429718018
+        },
+        {
+          "gen_tok_s": 72.09,
+          "gen_ms_per_tok": 13.87,
+          "prefill_tok_s": 441.45,
+          "wall_time": 4.053175687789917
+        }
+      ]
+    },
+    {
+      "name": "Qwen2.5 1.5B (Q4_K_M)",
+      "model_path": "/home/cpinchington/MedusaBitNet/models/competing/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "model_size_mb": 1117.320736,
+      "n_runs": 8,
+      "avg_gen_tok_s": 88.79125,
+      "avg_prefill_tok_s": 317.92375,
+      "avg_ms_per_tok": 11.2625,
+      "runs": [
+        {
+          "gen_tok_s": 88.83,
+          "gen_ms_per_tok": 11.26,
+          "prefill_tok_s": 277.6,
+          "wall_time": 3.4317729473114014
+        },
+        {
+          "gen_tok_s": 88.81,
+          "gen_ms_per_tok": 11.26,
+          "prefill_tok_s": 349.13,
+          "wall_time": 3.419360637664795
+        },
+        {
+          "gen_tok_s": 87.75,
+          "gen_ms_per_tok": 11.4,
+          "prefill_tok_s": 362.62,
+          "wall_time": 3.448280096054077
+        },
+        {
+          "gen_tok_s": 88.93,
+          "gen_ms_per_tok": 11.24,
+          "prefill_tok_s": 371.15,
+          "wall_time": 2.9640591144561768
+        },
+        {
+          "gen_tok_s": 88.83,
+          "gen_ms_per_tok": 11.26,
+          "prefill_tok_s": 278.95,
+          "wall_time": 3.4554200172424316
+        },
+        {
+          "gen_tok_s": 89.49,
+          "gen_ms_per_tok": 11.17,
+          "prefill_tok_s": 271.77,
+          "wall_time": 2.8726541996002197
+        },
+        {
+          "gen_tok_s": 88.94,
+          "gen_ms_per_tok": 11.24,
+          "prefill_tok_s": 278.1,
+          "wall_time": 3.42142915725708
+        },
+        {
+          "gen_tok_s": 88.75,
+          "gen_ms_per_tok": 11.27,
+          "prefill_tok_s": 354.07,
+          "wall_time": 3.4249227046966553
+        }
+      ]
+    },
+    {
+      "name": "Llama 3.2 1B (Q4_K_M)",
+      "model_path": "/home/cpinchington/MedusaBitNet/models/competing/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+      "model_size_mb": 807.694464,
+      "n_runs": 8,
+      "avg_gen_tok_s": 115.94624999999999,
+      "avg_prefill_tok_s": 440.73375,
+      "avg_ms_per_tok": 8.62625,
+      "runs": [
+        {
+          "gen_tok_s": 115.23,
+          "gen_ms_per_tok": 8.68,
+          "prefill_tok_s": 373.11,
+          "wall_time": 3.3805642127990723
+        },
+        {
+          "gen_tok_s": 115.66,
+          "gen_ms_per_tok": 8.65,
+          "prefill_tok_s": 499.09,
+          "wall_time": 3.3459088802337646
+        },
+        {
+          "gen_tok_s": 115.25,
+          "gen_ms_per_tok": 8.68,
+          "prefill_tok_s": 505.72,
+          "wall_time": 3.353907346725464
+        },
+        {
+          "gen_tok_s": 116.84,
+          "gen_ms_per_tok": 8.56,
+          "prefill_tok_s": 324.38,
+          "wall_time": 3.3358867168426514
+        },
+        {
+          "gen_tok_s": 115.81,
+          "gen_ms_per_tok": 8.63,
+          "prefill_tok_s": 531.45,
+          "wall_time": 3.3553287982940674
+        },
+        {
+          "gen_tok_s": 116.16,
+          "gen_ms_per_tok": 8.61,
+          "prefill_tok_s": 524.34,
+          "wall_time": 3.340409278869629
+        },
+        {
+          "gen_tok_s": 117.13,
+          "gen_ms_per_tok": 8.54,
+          "prefill_tok_s": 341.84,
+          "wall_time": 3.348862648010254
+        },
+        {
+          "gen_tok_s": 115.49,
+          "gen_ms_per_tok": 8.66,
+          "prefill_tok_s": 425.94,
+          "wall_time": 3.349743366241455
+        }
+      ]
+    },
+    {
+      "name": "Gemma 2 2B (Q4_K_M)",
+      "model_path": "/home/cpinchington/MedusaBitNet/models/competing/gemma-2-2b-it-Q4_K_M.gguf",
+      "model_size_mb": 1708.582752,
+      "n_runs": 8,
+      "avg_gen_tok_s": 50.53125,
+      "avg_prefill_tok_s": 200.96,
+      "avg_ms_per_tok": 19.7875,
+      "runs": [
+        {
+          "gen_tok_s": 50.47,
+          "gen_ms_per_tok": 19.81,
+          "prefill_tok_s": 184.03,
+          "wall_time": 5.728861331939697
+        },
+        {
+          "gen_tok_s": 50.67,
+          "gen_ms_per_tok": 19.73,
+          "prefill_tok_s": 229.99,
+          "wall_time": 5.6800384521484375
+        },
+        {
+          "gen_tok_s": 50.37,
+          "gen_ms_per_tok": 19.85,
+          "prefill_tok_s": 165.91,
+          "wall_time": 5.7390992641448975
+        },
+        {
+          "gen_tok_s": 50.7,
+          "gen_ms_per_tok": 19.72,
+          "prefill_tok_s": 174.06,
+          "wall_time": 5.694071292877197
+        },
+        {
+          "gen_tok_s": 50.63,
+          "gen_ms_per_tok": 19.75,
+          "prefill_tok_s": 190.64,
+          "wall_time": 5.7339208126068115
+        },
+        {
+          "gen_tok_s": 50.33,
+          "gen_ms_per_tok": 19.87,
+          "prefill_tok_s": 253.86,
+          "wall_time": 5.723286867141724
+        },
+        {
+          "gen_tok_s": 50.52,
+          "gen_ms_per_tok": 19.79,
+          "prefill_tok_s": 233.19,
+          "wall_time": 5.69863224029541
+        },
+        {
+          "gen_tok_s": 50.56,
+          "gen_ms_per_tok": 19.78,
+          "prefill_tok_s": 176.0,
+          "wall_time": 5.730913162231445
+        }
+      ]
+    }
+  ],
+  "hardware": "AMD Ryzen AI MAX+ 395 (Strix Halo)",
+  "threads": 16
+}

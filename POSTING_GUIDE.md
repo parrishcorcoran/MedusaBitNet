@@ -2,9 +2,12 @@
 
 ## The Claim
 
-**MedusaBitNet is the most energy-efficient LLM inference architecture ever demonstrated at the 2B+ parameter scale.**
+**MedusaBitNet is the first integration of Medusa speculative decoding with BitNet ternary-weight inference.**
 
-13 millijoules per token. 20x more efficient than LLaMA 3.2 1B. 50x more efficient than MiniCPM 2B. Same or better quality. Built by one person on a consumer AMD laptop.
+Measured: 2.21x speculation speedup (40K positions verified). 72.7 tok/s vanilla BitNet on Strix Halo — faster than Gemma 2B (50.5), competitive with Qwen 1.5B (88.8). With Medusa: projected 160 tok/s, which would beat every model tested head-to-head including Llama 3.2 1B.
+
+**What's proven:** Acceptance rates, training, head-to-head throughput.
+**What's projected:** End-to-end C++ Medusa throughput (activation quantization gap in I2_S kernel prevents it today — see status_transparency.png).
 
 ---
 
@@ -56,15 +59,14 @@ All components are MIT or Apache 2.0. MedusaBitNet itself is MIT licensed. No co
 
 ### Post 1: The Hook (with `hero_summary.png`)
 
-> I just built the most energy-efficient LLM on the planet.
+> First ever: Medusa speculative decoding on BitNet ternary weights.
 >
-> 13 millijoules per token. 20x less energy than LLaMA 3.2.
->
-> MedusaBitNet — first speculative decoding on ternary weights.
+> 2.21x measured speedup. 72.7 tok/s vanilla → projected 160 tok/s.
+> Beats Llama 3.2 1B, Qwen 1.5B, Gemma 2B — head-to-head on same hardware.
 >
 > Built on @AMD Strix Halo. @Microsoft's BitNet + @tianle_cai's Medusa.
 >
-> Huge thanks to both teams. Thread 🧵
+> All real numbers. Here's what we measured. Thread 🧵
 
 **Image:** `figures/hero_summary.png`
 
