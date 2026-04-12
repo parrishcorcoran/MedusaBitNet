@@ -83,6 +83,7 @@ def main():
     # ---- copy all metadata fields from input -------------------------------
     skipped_fields = {
         "GGUF.version", "GGUF.tensor_count", "GGUF.kv_count",
+        "general.architecture",
     }
     for key, field in reader.fields.items():
         if key in skipped_fields:
