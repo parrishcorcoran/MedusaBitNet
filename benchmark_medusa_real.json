@@ -1,0 +1,20 @@
+{
+  "vanilla_tok_s": 9.702234454033151,
+  "vanilla_steps": 5120,
+  "vanilla_tokens": 5120,
+  "vanilla_time_s": 527.7134895324707,
+  "medusa_tok_s": 5.806649835769172,
+  "medusa_steps": 2473,
+  "medusa_tokens": 5136,
+  "medusa_time_s": 884.5031378269196,
+  "speedup": 0.5984858295560347,
+  "tokens_per_step": 2.0768297614233724,
+  "head_acceptance": [
+    0.6295996765062677,
+    0.29033562474727054,
+    0.11120097048119693,
+    0.04569348968863728
+  ],
+  "n_sequences": 20,
+  "max_tokens_per_seq": 256
+}
