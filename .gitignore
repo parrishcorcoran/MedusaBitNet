@@ -8,9 +8,14 @@ venv/
 # Data & checkpoints
 data/
 checkpoints/
+checkpoints_gguf/
 *.bin
 *.pt
 *.safetensors
+*.gguf
+
+# Models (large files)
+models/
 
 # W&B
 wandb/
