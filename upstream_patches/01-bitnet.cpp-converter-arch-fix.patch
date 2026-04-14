@@ -1,0 +1,149 @@
+diff --git a/utils/convert-hf-to-gguf-bitnet.py b/utils/convert-hf-to-gguf-bitnet.py
+index 23e8438..d0dc933 100644
+--- a/utils/convert-hf-to-gguf-bitnet.py
++++ b/utils/convert-hf-to-gguf-bitnet.py
+@@ -754,8 +754,10 @@ class LlamaModel(Model):
+             #         self.gguf_writer.add_tensor(new_name, data, raw_shape=data.shape, raw_dtype=data.dtype)
+             #     continue
+ 
+-            for new_name, data in ((n, d.squeeze().numpy()) for n, d in self.modify_tensors(data_torch, name, bid)):
++            for new_name, data in ((n, d.squeeze().numpy() if d.dim() > 1 else d.numpy()) for n, d in self.modify_tensors(data_torch, name, bid)):
+                 data: np.ndarray = data  # type hint
++                if data.ndim == 0:
++                    data = data.reshape(1)  # GGML requires at least 1-dim
+                 data_shape = data.shape
+                 n_dims = len(data.shape)
+                 data_dtype = data.dtype
+@@ -952,20 +954,38 @@ class LlamaModel(Model):
+                 raise ValueError(f"Unprocessed experts: {experts}")
+ 
+ 
+-@Model.register("BitnetForCausalLM")
++@Model.register("BitnetForCausalLM", "BitNetForCausalLM")
+ class BitnetModel(Model):
+-    model_arch = gguf.MODEL_ARCH.BITNET
++    model_arch = gguf.MODEL_ARCH.BITNET_B158
+ 
+     def set_vocab(self):
+-        self._set_vocab_sentencepiece()
+-        
++        # BitNet-b1.58-2B-4T uses a HF tokenizer (tokenizer.json), not sentencepiece.
++        tokenizer_path = self.dir_model / 'tokenizer.model'
++        if tokenizer_path.is_file():
++            self._set_vocab_sentencepiece()
++        else:
++            try:
++                self._set_vocab_llama_hf()
++            except TypeError:
++                self._set_vocab_gpt2()
++
+     def set_gguf_parameters(self):
+         super().set_gguf_parameters()
+ 
+         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
+ 
+-        self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+-        self.gguf_writer.add_rope_scaling_factor(1.0)
++        hparams = self.hparams
++        if "head_dim" in hparams:
++            rope_dim = hparams["head_dim"]
++        else:
++            rope_dim = hparams["hidden_size"] // hparams["num_attention_heads"]
++        self.gguf_writer.add_rope_dimension_count(rope_dim)
++
++        # Match official Microsoft GGUF tokenizer metadata.
++        # Vocab path already writes bos/eos token ids; add the missing ones.
++        self.gguf_writer.add_pad_token_id(128001)
++        self.gguf_writer.add_add_bos_token(True)
++        self.gguf_writer.add_token_scores([0.0] * self.hparams["vocab_size"])
+ 
+     def weight_quant(self, weight):
+         dtype = weight.dtype
+@@ -974,15 +994,56 @@ class BitnetModel(Model):
+         result = (weight * s).round().clamp(-1, 1) / s
+         return result.type(dtype)
+ 
++    _weight_scales_cache: dict = {}
++
+     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+-        # quant weight to i2 (in fp16)
+-        if name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight", 
+-                          "down_proj.weight", "up_proj.weight", "gate_proj.weight",
+-                          "o_proj.weight")):
+-            data_torch = self.weight_quant(data_torch)
++        # Cache weight_scale values; don't write them as separate tensors.
++        # The I2_S quantization will absorb them via the derived i2_scale.
++        if name.endswith(".weight_scale"):
++            target_name = name.replace(".weight_scale", ".weight")
++            self._weight_scales_cache[target_name] = data_torch.float().item()
++            return []
++
++        # Map sub_norm layers manually — the HF names don't match the tensor map.
++        if "attn_sub_norm" in name and bid is not None:
++            return [(f"blk.{bid}.attn_sub_norm.weight", data_torch)]
++        if "ffn_sub_norm" in name and bid is not None:
++            return [(f"blk.{bid}.ffn_sub_norm.weight", data_torch)]
++
++        PROJ_SUFFIXES = ("q_proj.weight", "k_proj.weight", "v_proj.weight",
++                         "down_proj.weight", "up_proj.weight", "gate_proj.weight",
++                         "o_proj.weight")
++        if name.endswith(PROJ_SUFFIXES):
++            # Pre-quantized 2B-4T: divide ternary by weight_scale so that
++            # I2_S quantization's derived i2_scale = 1/weight_scale captures
++            # the correct magnitude. This matches the HF forward:
++            # y = matmul(x, ternary) / (input_scale * weight_scale)
++            # = matmul(x, ternary/weight_scale) / input_scale
++            if name in self._weight_scales_cache:
++                scale = self._weight_scales_cache[name]
++                data_torch = data_torch / scale
++            else:
++                # Original 3B format: float weights, quantize with weight_quant.
++                data_torch = self.weight_quant(data_torch)
+ 
+         return [(self.map_tensor_name(name), data_torch)]
+ 
++    @staticmethod
++    def _unpack_ternary(packed: Tensor) -> Tensor:
++        """Unpack uint8-packed ternary weights to float32 {-1, 0, 1}.
++
++        Matches transformers.integrations.bitnet.unpack_weights exactly:
++        - Pack format: {-1,0,1} + 1 -> {0,1,2}, 4 values per byte, row-major.
++        - Unpack: extract 2-bit pairs, subtract 1.
++        - Row interleaving: bits [0:2] -> rows [0:R], bits [2:4] -> rows [R:2R], etc.
++        """
++        R = packed.shape[0]
++        unpacked = torch.zeros((R * 4, *packed.shape[1:]), dtype=torch.uint8, device=packed.device)
++        for i in range(4):
++            mask = 3 << (2 * i)
++            unpacked[i * R : (i + 1) * R] = (packed & mask) >> (2 * i)
++        return unpacked.float() - 1.0
++
+     def write_tensors(self):
+         max_name_len = max(len(s) for _, s in self.tensor_map.mapping.values()) + len(".weight,")
+ 
+@@ -993,6 +1054,13 @@ class BitnetModel(Model):
+ 
+             old_dtype = data_torch.dtype
+ 
++            # Unpack uint8-packed ternary weights (BitNet-b1.58-2B-4T format)
++            if data_torch.dtype == torch.uint8 and name.endswith(
++                ("q_proj.weight", "k_proj.weight", "v_proj.weight",
++                 "down_proj.weight", "up_proj.weight", "gate_proj.weight",
++                 "o_proj.weight")):
++                data_torch = self._unpack_ternary(data_torch)
++
+             # convert any unsupported data types to float32
+             if data_torch.dtype not in (torch.float16, torch.float32):
+                 data_torch = data_torch.to(torch.float32)
+@@ -1004,8 +1072,10 @@ class BitnetModel(Model):
+                     bid = int(part)
+                     break
+ 
+-            for new_name, data in ((n, d.squeeze().numpy()) for n, d in self.modify_tensors(data_torch, name, bid)):
++            for new_name, data in ((n, d.squeeze().numpy() if d.dim() > 1 else d.numpy()) for n, d in self.modify_tensors(data_torch, name, bid)):
+                 data: np.ndarray = data  # type hint
++                if data.ndim == 0:
++                    data = data.reshape(1)  # GGML requires at least 1-dim
+                 data_shape = data.shape
+                 n_dims = len(data.shape)
+                 data_dtype = data.dtype

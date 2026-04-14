@@ -1,0 +1,17 @@
+diff --git a/examples/eval-callback/CMakeLists.txt b/examples/eval-callback/CMakeLists.txt
+index a48753d..eddd30f 100644
+--- a/examples/eval-callback/CMakeLists.txt
++++ b/examples/eval-callback/CMakeLists.txt
+@@ -4,6 +4,12 @@ install(TARGETS ${TARGET} RUNTIME)
+ target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
+ target_compile_features(${TARGET} PRIVATE cxx_std_11)
+ 
++set(TARGET llama-hidden-dump)
++add_executable(${TARGET} hidden-dump.cpp)
++install(TARGETS ${TARGET} RUNTIME)
++target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
++target_compile_features(${TARGET} PRIVATE cxx_std_11)
++
+ set(TEST_TARGET test-eval-callback)
+ add_test(NAME ${TEST_TARGET} COMMAND llama-eval-callback --hf-repo ggml-org/models --hf-file tinyllamas/stories260K.gguf --model stories260K.gguf --prompt hello --seed 42 -ngl 0)
+ set_property(TEST ${TEST_TARGET} PROPERTY LABELS eval-callback curl)
