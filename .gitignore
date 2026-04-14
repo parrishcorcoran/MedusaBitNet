@@ -24,3 +24,6 @@ wandb/
 .vscode/
 .idea/
 .DS_Store
+
+# Runtime logs
+logs/

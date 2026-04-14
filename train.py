@@ -179,7 +179,15 @@ def medusa_loss(
         assert T_plus_1 == T + 1, f"targets must be seq_len+1 long, got {T_plus_1} vs T={T}"
 
         for i in range(num_heads):
-            shift = i + 1
+            # Head i predicts token at position t + i + 2 (NOT t + i + 1).
+            # Rationale: llama-medusa's C++ speculation loop places spec_tokens[k]
+            # at the chain position two beyond the last_token (P+2+k), then
+            # verifies against backbone's logits at slot k (which predicts P+2+k).
+            # So head-k's correct target is content at P+2+k. Previously used
+            # shift=i+1, which produced heads that were always off-by-one
+            # relative to inference — guaranteed zero C++ acceptance no matter
+            # how well the head trained in Python.
+            shift = i + 2
             valid_len = T - shift + 1
             if valid_len <= 0:
                 accuracies.append(0.0)
@@ -198,12 +206,13 @@ def medusa_loss(
     else:
         # -------- subsampled path --------
         # medusa_logits: [B, P, k, V] — already gathered at pos_indices upstream.
-        # For each head i, target at sampled position p is targets[:, p + i + 1].
-        # Caller must ensure every p + num_heads < T_full + 1 (i.e. pos_indices
-        # was drawn from [0, T_full - num_heads)).
+        # For each head i, target at sampled position p is targets[:, p + i + 2].
+        # See the full-sequence path above for the shift=i+2 rationale.
+        # Caller must ensure every p + num_heads + 1 < T_full + 1 (i.e.
+        # pos_indices was drawn from [0, T_full - num_heads - 1)).
         B, P, K, V = medusa_logits.shape
         for i in range(num_heads):
-            shift = i + 1
+            shift = i + 2
             logits_i = medusa_logits[:, :, i, :]                    # [B, P, V]
             target_idx = pos_indices + shift                        # [B, P]
             targets_i = torch.gather(targets, 1, target_idx)        # [B, P]
@@ -366,9 +375,10 @@ def main():
             targets = targets.to(device, non_blocking=True)
 
             # Position subsampling: random subset of valid positions. Valid
-            # positions are 0..T - num_heads so every head's target is in range.
+            # positions are 0..T - num_heads - 1 so every head's target
+            # (position t + head_idx + 2) is in range.
             B, T, _ = hidden.shape
-            max_valid = T - cfg.num_heads
+            max_valid = T - cfg.num_heads - 1
             if cfg.loss_positions > 0 and cfg.loss_positions < max_valid:
                 P = cfg.loss_positions
                 # Independent permutation per batch element, then take first P.
