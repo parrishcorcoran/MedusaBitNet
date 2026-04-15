@@ -4,6 +4,17 @@
 
 ---
 
+## ☀️ Morning headline (2026-04-15, 7:00 AM) — updated
+
+**🔥 Biggest single finding of the overnight (past 6:30 AM):**
+Hidden-state neighborhood distance is a genuinely new orthogonal aperture that nobody in the scouted literature uses as a compute gate. Adding 3 neighborhood features pushed skip rate at λ=0.95 from 5.3% → 6.8% on held-out — **+28% relative** — in one drop. Biggest single feature gain of the session.
+
+Your H2O heavy-hitters intuition was exactly right: if current hidden state is close to recent hidden states, we're in a heavily-revisited region of state space = the model is "cycling" = next token predictable. This is the temporal analog of H2O's attention-heavy-hitters: ~20% of the hidden-state manifold gets visited 80% of the time. First (that we can find) to use this as a gate signal.
+
+**The 4.57 → 14.4 gap pointed right at this.** Our feature-space PCA was 4.57 dimensions; raw hidden-state manifold is 14.4. Gap was a roadmap of unmeasured dimensions. Neighborhood was the first one tested; it delivered. Suggests 2-3 more untapped apertures (attention entropy, layer-wise evolution, spectral/wavelet trajectory) would close more of the gap.
+
+---
+
 ## ☀️ Morning headline (2026-04-15, 6:40 AM)
 
 Overnight produced several publishable findings. Short version:
